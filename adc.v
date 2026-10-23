@@ -1,23 +1,30 @@
+`timescale 1ns/1ps
+
 module adc #(
-    parameter BITS = 10,
-    parameter VREF_MV = 5000
+    parameter integer BITS = 8,
+    parameter integer VREF_MV = 5000
 )(
-    input  wire [15:0] voltage_mv,
+    input  wire [31:0] voltage_mv,
     output reg  [BITS-1:0] digital_code
 );
 
     integer max_code;
-    integer code_calc;
+    integer scaled_code;
 
     always @(*) begin
         max_code = (1 << BITS) - 1;
 
-        if (voltage_mv >= VREF_MV)
+        if (voltage_mv >= VREF_MV) begin
             digital_code = max_code;
+        end
         else begin
-            code_calc = (voltage_mv * max_code) / VREF_MV;
-            digital_code = code_calc;
+            scaled_code =
+                (voltage_mv * max_code + VREF_MV / 2)
+                / VREF_MV;
+
+            digital_code = scaled_code;
         end
     end
 
 endmodule
+
