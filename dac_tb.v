@@ -1,31 +1,43 @@
 `timescale 1ns/1ps
 
-module dac_tb;
+module tb_dac;
 
-reg [3:0] digital_in;
-    wire [15:0] vout_mv;
+    reg  [9:0]  digital_code;
+    wire [15:0] voltage_mv;
 
-dac uut (
-        .digital_in(digital_in),
-        .vout_mv(vout_mv)
+    integer input_file;
+    integer scan_status;
+
+    dac #(
+        .BITS(10),
+        .VREF_MV(5000)
+    ) dut (
+        .digital_code(digital_code),
+        .voltage_mv(voltage_mv)
     );
 
-    integer i;
+    initial begin
+        input_file = $fopen("dac_inputs.txt", "r");
 
-initial begin
-        $dumpfile("dac_wave.vcd");
-        $dumpvars(0, dac_tb);
-
-$display("DAC RESULTS");
-        $display("Digital_Code,Voltage_mV");
-
-        for (i = 0; i <16; i = i + 1) begin
-            digital_in = i;
-            #10;
-            $display("%0d,%0d", digital_in, vout_mv);
+        if (input_file == 0) begin
+            $display("ERROR: Cannot open dac_inputs.txt");
+            $finish;
         end
 
-$finish;
+        $display("Digital Code | Voltage(mV)");
+        $display("--------------------------");
+
+        while (!$feof(input_file)) begin
+            scan_status = $fscanf(input_file, "%d\n", digital_code);
+
+            if (scan_status == 1) begin
+                #10;
+                $display("%d | %d", digital_code, voltage_mv);
+            end
+        end
+
+        $fclose(input_file);
+        $finish;
     end
 
 endmodule
