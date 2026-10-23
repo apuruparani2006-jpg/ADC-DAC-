@@ -47,7 +47,7 @@ api_key = st.sidebar.text_input(
 
 model_name = st.sidebar.text_input(
     "Groq model",
-    value="llama-3.3-70b-versatile"
+  value="openai/gpt-oss-120b"
 )
 
 st.sidebar.caption(
