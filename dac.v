@@ -10,9 +10,7 @@ module dac #(
 
     always @(*) begin
         max_code = (1 << BITS) - 1;
-
-        voltage_mv =
-            (digital_code * VREF_MV) / max_code;
+        voltage_mv = (digital_code * VREF_MV) / max_code;
     end
 
 endmodule
