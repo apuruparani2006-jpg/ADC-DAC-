@@ -1,4 +1,6 @@
+
 streamlit>=1.40
 pandas>=2.2
 matplotlib>=3.8
-google-genai>=1.0
+openai
+
