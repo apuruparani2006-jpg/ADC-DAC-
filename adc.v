@@ -6,17 +6,18 @@ module adc #(
     output reg  [BITS-1:0] digital_code
 );
 
-    integer code_calc;
     integer max_code;
+    integer code_calc;
 
     always @(*) begin
         max_code = (1 << BITS) - 1;
 
         if (voltage_mv >= VREF_MV)
             digital_code = max_code;
-        else
-            digital_code =
-                (voltage_mv * max_code) / VREF_MV;
+        else begin
+            code_calc = (voltage_mv * max_code) / VREF_MV;
+            digital_code = code_calc;
+        end
     end
 
 endmodule
