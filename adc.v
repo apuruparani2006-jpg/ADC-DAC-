@@ -1,22 +1,22 @@
-
-module adc (
-    input  [15:0] vin_mv,
-    output reg [3:0] digital_out
+module adc #(
+    parameter BITS = 10,
+    parameter VREF_MV = 5000
+)(
+    input  wire [15:0] voltage_mv,
+    output reg  [BITS-1:0] digital_code
 );
 
-    integer temp_code;
+    integer code_calc;
+    integer max_code;
 
     always @(*) begin
-        // Map 0–3300 mV to a 4-bit digital code
-        temp_code = (vin_mv * 16) / 3300;
+        max_code = (1 << BITS) - 1;
 
-        // Saturate at the maximum 4-bit code
-        if (vin_mv >= 3300)
-            digital_out = 4'd15;
-        else if (temp_code > 15)
-            digital_out = 4'd15;
+        if (voltage_mv >= VREF_MV)
+            digital_code = max_code;
         else
-            digital_out = temp_code[3:0];
+            digital_code =
+                (voltage_mv * max_code) / VREF_MV;
     end
 
 endmodule
