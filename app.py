@@ -613,7 +613,7 @@ Student's question:
 
                     with st.spinner("AI Tutor is preparing your answer..."):
                         response = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.8-flash",
                             contents=prompt
                         )
 
