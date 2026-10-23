@@ -10,71 +10,83 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+from openai import OpenAI
+
+
+# ==================================================
+# APPLICATION SETTINGS
+# ==================================================
 
 ROOT = Path(__file__).resolve().parent
 BITS_OPTIONS = [4, 8, 10, 12, 16]
+MAX_SAMPLES = 1000
 
 st.set_page_config(
-    page_title="ADC and DAC Simulator with AI Tutor",
+    page_title="ADC DAC Simulator with AI Tutor",
     page_icon="🔌",
     layout="wide"
 )
 
 st.title("ADC & DAC Visual Simulator")
 st.caption(
-    "Verilog simulation | Adjustable inputs | Waveform plots | AI Tutor"
+    "Verilog simulation | Adjustable inputs | Graphs | OpenAI AI Tutor"
 )
 
 
-# --------------------------------------------------
-# VERILOG SIMULATION FUNCTIONS
-# --------------------------------------------------
+# ==================================================
+# VERILOG SIMULATION
+# ==================================================
 
 def simulate_verilog(mode, values, bits, vref_mv):
-    """Compile and execute the corresponding Verilog testbench."""
+    """Compile and run the selected Verilog testbench."""
 
-    required_files = [
-        ROOT / "adc.v",
-        ROOT / "dac.v",
-        ROOT / "tb_adc.v",
-        ROOT / "tb_dac.v",
-    ]
+    filenames_by_mode = {
+        "ADC": ["adc.v", "tb_adc.v"],
+        "DAC": ["dac.v", "tb_dac.v"],
+    }
 
-    missing = [p.name for p in required_files if not p.exists()]
-    if missing:
-        raise RuntimeError("Missing files: " + ", ".join(missing))
+    if mode not in filenames_by_mode:
+        raise ValueError("Invalid simulation mode.")
+
+    filenames = filenames_by_mode[mode]
+    top = "tb_adc" if mode == "ADC" else "tb_dac"
+    input_filename = (
+        "adc_inputs.txt" if mode == "ADC"
+        else "dac_inputs.txt"
+    )
+
+    pattern = (
+        r"ADC_RESULT\s+(\d+)\s+(\d+)"
+        if mode == "ADC"
+        else r"DAC_RESULT\s+(\d+)\s+(\d+)"
+    )
+
+    for filename in filenames:
+        if not (ROOT / filename).is_file():
+            raise FileNotFoundError(
+                f"Required file is missing: {filename}"
+            )
 
     compiler = shutil.which("iverilog")
     runner = shutil.which("vvp")
 
     if not compiler or not runner:
         raise RuntimeError(
-            "Icarus Verilog is unavailable. Use the supplied Dockerfile "
-            "or install Icarus Verilog."
+            "Icarus Verilog was not found. "
+            "Check your Dockerfile and Render deployment."
         )
 
-    if mode not in ("ADC", "DAC"):
-        raise ValueError("Unknown simulation mode.")
+    with tempfile.TemporaryDirectory(
+        prefix="adc_dac_sim_"
+    ) as temporary_directory:
 
-    with tempfile.TemporaryDirectory(prefix="adc_dac_") as folder:
-        work = Path(folder)
-
-        if mode == "ADC":
-            filenames = ["adc.v", "tb_adc.v"]
-            input_filename = "adc_inputs.txt"
-            top = "tb_adc"
-            pattern = r"ADC_RESULT\s+(\d+)\s+(\d+)"
-        else:
-            filenames = ["dac.v", "tb_dac.v"]
-            input_filename = "dac_inputs.txt"
-            top = "tb_dac"
-            pattern = r"DAC_RESULT\s+(\d+)\s+(\d+)"
+        work = Path(temporary_directory)
 
         for filename in filenames:
             shutil.copy2(ROOT / filename, work / filename)
 
         (work / input_filename).write_text(
-            "".join(f"{int(v)}\n" for v in values),
+            "".join(f"{int(value)}\n" for value in values),
             encoding="utf-8"
         )
 
@@ -88,7 +100,7 @@ def simulate_verilog(mode, values, bits, vref_mv):
             *filenames,
         ]
 
-        compiled = subprocess.run(
+        compilation = subprocess.run(
             compile_command,
             cwd=work,
             capture_output=True,
@@ -96,13 +108,14 @@ def simulate_verilog(mode, values, bits, vref_mv):
             timeout=30,
         )
 
-        if compiled.returncode != 0:
+        if compilation.returncode != 0:
             raise RuntimeError(
-                "Verilog compilation error:\n"
-                + compiled.stdout + compiled.stderr
+                "Verilog compilation failed:\n"
+                + compilation.stdout
+                + compilation.stderr
             )
 
-        executed = subprocess.run(
+        execution = subprocess.run(
             [runner, "simulation.out"],
             cwd=work,
             capture_output=True,
@@ -110,66 +123,106 @@ def simulate_verilog(mode, values, bits, vref_mv):
             timeout=30,
         )
 
-        if executed.returncode != 0:
+        if execution.returncode != 0:
             raise RuntimeError(
-                "Simulation error:\n"
-                + executed.stdout + executed.stderr
+                "Verilog simulation failed:\n"
+                + execution.stdout
+                + execution.stderr
             )
 
-        matches = re.findall(pattern, executed.stdout)
+        matches = re.findall(pattern, execution.stdout)
 
         if len(matches) != len(values):
             raise RuntimeError(
-                "Could not read every result from the Verilog simulation.\n"
-                + executed.stdout
+                "The simulation did not return all expected results.\n"
+                + execution.stdout
             )
 
-        results = [(int(a), int(b)) for a, b in matches]
-        return results, executed.stdout
+        results = [
+            (int(first), int(second))
+            for first, second in matches
+        ]
+
+        return results, execution.stdout
 
 
-# --------------------------------------------------
-# WAVEFORM GENERATOR
-# --------------------------------------------------
+# ==================================================
+# WAVEFORM GENERATION
+# ==================================================
 
-def generate_waveform(kind, minimum, maximum,
-                      frequency, sampling_rate, cycles):
+def waveform_value(kind, time, frequency, minimum, maximum):
+    phase = (frequency * time) % 1.0
 
+    if kind == "Sine":
+        unit_value = math.sin(2 * math.pi * phase)
+
+    elif kind == "Square":
+        unit_value = 1.0 if phase < 0.5 else -1.0
+
+    elif kind == "Triangle":
+        unit_value = 1.0 - 4.0 * abs(phase - 0.5)
+
+    else:  # Sawtooth
+        unit_value = 2.0 * phase - 1.0
+
+    midpoint = (minimum + maximum) / 2.0
+    amplitude = (maximum - minimum) / 2.0
+
+    return midpoint + amplitude * unit_value
+
+
+def generate_waveform(
+    kind, minimum, maximum, frequency, sampling_rate, cycles
+):
     duration = cycles / frequency
+
+    requested_samples = math.floor(
+        duration * sampling_rate
+    ) + 1
+
     sample_count = min(
-        1000,
-        max(2, int(duration * sampling_rate) + 1)
+        MAX_SAMPLES,
+        max(2, requested_samples)
     )
 
-    times = [i / sampling_rate for i in range(sample_count)]
+    times = [
+        index / sampling_rate
+        for index in range(sample_count)
+    ]
 
-    midpoint = (minimum + maximum) / 2
-    amplitude = (maximum - minimum) / 2
+    voltages = [
+        waveform_value(
+            kind, time, frequency, minimum, maximum
+        )
+        for time in times
+    ]
 
-    voltages = []
+    # A separate dense curve makes the waveform easier to view.
+    curve_count = 500
 
-    for time in times:
-        phase = (frequency * time) % 1.0
+    curve_times = [
+        duration * index / (curve_count - 1)
+        for index in range(curve_count)
+    ]
 
-        if kind == "Sine":
-            wave = math.sin(2 * math.pi * phase)
+    curve_voltages = [
+        waveform_value(
+            kind, time, frequency, minimum, maximum
+        )
+        for time in curve_times
+    ]
 
-        elif kind == "Square":
-            wave = 1.0 if phase < 0.5 else -1.0
-
-        elif kind == "Triangle":
-            wave = 1 - 4 * abs(phase - 0.5)
-
-        else:  # Sawtooth
-            wave = 2 * phase - 1
-
-        voltages.append(midpoint + amplitude * wave)
-
-    return times, voltages
+    return (
+        times,
+        voltages,
+        curve_times,
+        curve_voltages,
+        requested_samples > MAX_SAMPLES,
+    )
 
 
 def map_voltage_to_adc(voltage, minimum, maximum, vref_mv):
-    """Map the selected input range into the ADC's 0-to-Vref range."""
+    """Map the selected waveform range into 0 through Vref."""
 
     fraction = (voltage - minimum) / (maximum - minimum)
     fraction = max(0.0, min(1.0, fraction))
@@ -177,79 +230,85 @@ def map_voltage_to_adc(voltage, minimum, maximum, vref_mv):
     return round(fraction * vref_mv)
 
 
-def save_csv(rows, filename):
-    data = pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+def download_csv(rows, filename):
+    csv_data = pd.DataFrame(rows).to_csv(
+        index=False
+    ).encode("utf-8")
 
     st.download_button(
-        "Download CSV results",
-        data,
+        label="Download CSV results",
+        data=csv_data,
         file_name=filename,
-        mime="text/csv"
+        mime="text/csv",
+        key=f"download_{filename}",
     )
 
 
-# --------------------------------------------------
-# ADC PAGE
-# --------------------------------------------------
+# ==================================================
+# ADC TAB
+# ==================================================
 
 adc_tab, dac_tab, tutor_tab = st.tabs(
-    ["ADC", "DAC", "AI Tutor"]
+    ["ADC Simulator", "DAC Simulator", "AI Tutor"]
 )
 
 with adc_tab:
-    st.header("ADC: Analog input to digital output")
+    st.header("Analog-to-Digital Converter")
 
-    col1, col2 = st.columns(2)
+    left, right = st.columns(2)
 
-    with col1:
+    with left:
         waveform = st.selectbox(
-            "Waveform",
-            ["Sine", "Square", "Triangle", "Sawtooth"]
+            "Select waveform",
+            ["Sine", "Square", "Triangle", "Sawtooth"],
         )
 
         minimum = st.number_input(
-            "Minimum voltage (V)",
-            value=0.0,
+            "Minimum input voltage (V)",
             min_value=-100.0,
             max_value=100.0,
-            step=0.1
+            value=0.0,
+            step=0.5,
         )
 
         maximum = st.number_input(
-            "Maximum voltage (V)",
-            value=5.0,
+            "Maximum input voltage (V)",
             min_value=-100.0,
             max_value=100.0,
-            step=0.1
+            value=5.0,
+            step=0.5,
         )
 
         frequency = st.number_input(
             "Signal frequency (Hz)",
             min_value=0.1,
             max_value=100000.0,
-            value=100.0
+            value=100.0,
+            step=10.0,
         )
 
-    with col2:
+    with right:
         sampling_rate = st.number_input(
             "Sampling frequency (samples/second)",
             min_value=1.0,
             max_value=1000000.0,
-            value=1000.0
+            value=1000.0,
+            step=100.0,
         )
 
         cycles = st.number_input(
-            "Cycles to display",
+            "Number of cycles",
             min_value=1,
             max_value=10,
-            value=2
+            value=2,
         )
 
         adc_bits = st.selectbox(
             "ADC resolution",
             BITS_OPTIONS,
             index=1,
-            format_func=lambda b: f"{b} bits ({2**b} levels)"
+            format_func=lambda value:
+                f"{value} bits ({2**value} levels)",
         )
 
         adc_vref = st.number_input(
@@ -257,126 +316,205 @@ with adc_tab:
             min_value=0.1,
             max_value=10.0,
             value=5.0,
-            step=0.1
+            step=0.1,
         )
 
     st.info(
-        "The selected minimum and maximum voltages define the input "
-        "waveform range. This simulator maps that range to 0–Vref "
-        "before conversion, allowing negative input ranges as well."
+        "This educational model maps the selected waveform's "
+        "minimum and maximum to 0 V and the ADC reference voltage. "
+        "It can therefore demonstrate negative input ranges, but "
+        "it does not model a physical bipolar ADC."
     )
 
     if sampling_rate < 2 * frequency:
         st.warning(
-            "Sampling frequency is below twice the signal frequency. "
-            "The waveform may be undersampled."
+            "The sampling frequency is below twice the signal "
+            "frequency. Aliasing may occur."
         )
 
-    if st.button("Run ADC", type="primary"):
+    if st.button("Run ADC Simulation", type="primary"):
         if maximum <= minimum:
-            st.error("Maximum voltage must be greater than minimum voltage.")
+            st.error(
+                "Maximum input voltage must be greater than minimum."
+            )
 
         else:
             try:
-                times, analog = generate_waveform(
-                    waveform, minimum, maximum,
-                    frequency, sampling_rate, cycles
+                (
+                    times,
+                    analog_voltages,
+                    curve_times,
+                    curve_voltages,
+                    sample_limit_reached,
+                ) = generate_waveform(
+                    waveform,
+                    minimum,
+                    maximum,
+                    frequency,
+                    sampling_rate,
+                    cycles,
                 )
+
+                if sample_limit_reached:
+                    st.warning(
+                        f"The requested waveform needs more than "
+                        f"{MAX_SAMPLES} samples. The display is capped "
+                        f"at {MAX_SAMPLES} samples, so it covers only "
+                        f"the beginning of the requested time window."
+                    )
 
                 vref_mv = round(adc_vref * 1000)
 
                 adc_inputs = [
-                    map_voltage_to_adc(v, minimum, maximum, vref_mv)
-                    for v in analog
+                    map_voltage_to_adc(
+                        voltage,
+                        minimum,
+                        maximum,
+                        vref_mv,
+                    )
+                    for voltage in analog_voltages
                 ]
 
-                result, raw_output = simulate_verilog(
-                    "ADC", adc_inputs, adc_bits, vref_mv
+                simulation_results, raw_output = simulate_verilog(
+                    "ADC",
+                    adc_inputs,
+                    adc_bits,
+                    vref_mv,
                 )
 
-                codes = [code for _, code in result]
+                codes = [
+                    code for _, code in simulation_results
+                ]
+
                 max_code = (1 << adc_bits) - 1
 
-                represented = [
-                    minimum + code / max_code * (maximum - minimum)
+                represented_voltages = [
+                    minimum
+                    + (code / max_code) * (maximum - minimum)
                     for code in codes
                 ]
 
-                st.subheader("Analog input waveform")
+                st.subheader("Input waveform")
 
                 fig, ax = plt.subplots(figsize=(10, 4))
-                ax.plot(times, analog, label="Analog input")
-                ax.scatter(times, analog, s=12, label="Sample points")
+
+                ax.plot(
+                    curve_times,
+                    curve_voltages,
+                    label="Analog waveform",
+                )
+
+                ax.scatter(
+                    times,
+                    analog_voltages,
+                    s=18,
+                    label="Sampling points",
+                )
+
                 ax.set_xlabel("Time (seconds)")
-                ax.set_ylabel("Voltage (V)")
-                ax.set_title("ADC input")
+                ax.set_ylabel("Input voltage (V)")
+                ax.set_title(f"{waveform} waveform")
                 ax.grid(True, alpha=0.3)
                 ax.legend()
+
                 st.pyplot(fig)
                 plt.close(fig)
 
-                st.subheader("Digital output waveform")
+                st.subheader("Digital output codes")
 
                 fig, ax = plt.subplots(figsize=(10, 4))
-                ax.step(times, codes, where="post")
+
+                ax.step(
+                    times,
+                    codes,
+                    where="post",
+                )
+
                 ax.set_xlabel("Time (seconds)")
                 ax.set_ylabel(f"Digital code (0–{max_code})")
                 ax.set_title(f"{adc_bits}-bit ADC output")
                 ax.grid(True, alpha=0.3)
+
                 st.pyplot(fig)
                 plt.close(fig)
 
                 rows = []
 
-                for i, (t, vin, code, vout) in enumerate(
-                    zip(times, analog, codes, represented)
+                for index, (
+                    time,
+                    voltage,
+                    code,
+                    represented_voltage,
+                ) in enumerate(
+                    zip(
+                        times,
+                        analog_voltages,
+                        codes,
+                        represented_voltages,
+                    )
                 ):
                     rows.append({
-                        "Sample": i,
-                        "Time_s": round(t, 8),
-                        "Input_voltage_V": round(vin, 6),
+                        "Sample": index,
+                        "Time_s": round(time, 8),
+                        "Input_voltage_V": round(voltage, 6),
+                        "ADC_input_mV": adc_inputs[index],
                         "Digital_decimal": code,
                         "Digital_binary": format(
                             code, f"0{adc_bits}b"
                         ),
-                        "Represented_voltage_V": round(vout, 6),
+                        "Represented_voltage_V": round(
+                            represented_voltage, 6
+                        ),
                     })
 
                 st.subheader("Sample-by-sample results")
+
                 st.dataframe(
                     pd.DataFrame(rows),
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
                 )
 
-                st.metric("Number of samples", len(codes))
-                st.metric("Digital levels", 1 << adc_bits)
-                st.metric(
-                    "Voltage step across selected range",
-                    f"{(maximum - minimum) / max_code:.6f} V"
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric(
+                    "Number of samples",
+                    len(codes),
                 )
 
-                save_csv(rows, "adc_results.csv")
+                col2.metric(
+                    "Digital levels",
+                    1 << adc_bits,
+                )
 
-                with st.expander("Raw Verilog simulation output"):
+                col3.metric(
+                    "Ideal step across selected range",
+                    f"{(maximum - minimum) / max_code:.6f} V",
+                )
+
+                download_csv(rows, "adc_results.csv")
+
+                with st.expander("Verilog simulation output"):
                     st.code(raw_output)
 
             except Exception as error:
-                st.error(str(error))
+                st.error("ADC simulation failed.")
+                st.code(str(error)[:2000])
 
 
-# --------------------------------------------------
-# DAC PAGE
-# --------------------------------------------------
+# ==================================================
+# DAC TAB
+# ==================================================
 
 with dac_tab:
-    st.header("DAC: Digital input to analog output")
+    st.header("Digital-to-Analog Converter")
 
     dac_bits = st.selectbox(
         "DAC resolution",
         BITS_OPTIONS,
         index=1,
-        format_func=lambda b: f"{b} bits ({2**b} levels)"
+        format_func=lambda value:
+            f"{value} bits ({2**value} levels)",
     )
 
     dac_vref = st.number_input(
@@ -384,35 +522,50 @@ with dac_tab:
         min_value=0.1,
         max_value=10.0,
         value=5.0,
-        step=0.1
+        step=0.1,
     )
 
     input_format = st.radio(
         "Digital input format",
         ["Decimal", "Binary"],
-        horizontal=True
+        horizontal=True,
+    )
+
+    default_codes = (
+        "0, 64, 128, 192, 255"
+        if dac_bits == 8
+        else "0, 1, 2, 3"
     )
 
     code_text = st.text_area(
-        "Enter one code or a sequence separated by commas",
-        value="0, 64, 128, 192, 255" if dac_bits == 8 else "0, 1, 2, 3",
-        help="Example for 8 bits: 0, 64, 128, 192, 255"
+        "Enter digital codes separated by commas",
+        value=default_codes,
+        help=(
+            "Example: decimal 0, 64, 128, 255 "
+            "or binary 00000000, 01000000, 11111111."
+        ),
     )
+
+    max_dac_code = (1 << dac_bits) - 1
 
     st.caption(
-        f"Allowed code range: 0 to {(1 << dac_bits) - 1}."
+        f"Valid digital code range: 0 to {max_dac_code}."
     )
 
-    if st.button("Run DAC", type="primary"):
+    if st.button("Run DAC Simulation", type="primary"):
         try:
             tokens = [
                 token.strip().replace("_", "")
-                for token in re.split(r"[,;\s]+", code_text.strip())
+                for token in re.split(
+                    r"[,;\s]+", code_text.strip()
+                )
                 if token.strip()
             ]
 
             if not tokens:
-                raise ValueError("Enter at least one digital code.")
+                raise ValueError(
+                    "Enter at least one digital code."
+                )
 
             codes = []
 
@@ -420,12 +573,13 @@ with dac_tab:
                 if input_format == "Binary":
                     if not re.fullmatch(r"[01]+", token):
                         raise ValueError(
-                            f"{token} is not a valid binary code."
+                            f"'{token}' is not a valid binary code."
                         )
 
                     if len(token) > dac_bits:
                         raise ValueError(
-                            f"{token} exceeds the selected bit width."
+                            f"'{token}' exceeds the selected "
+                            f"{dac_bits}-bit resolution."
                         )
 
                     code = int(token, 2)
@@ -433,215 +587,263 @@ with dac_tab:
                 else:
                     if not re.fullmatch(r"\d+", token):
                         raise ValueError(
-                            f"{token} is not a valid decimal code."
+                            f"'{token}' is not a valid decimal code."
                         )
 
                     code = int(token)
 
-                if not 0 <= code < (1 << dac_bits):
+                if not 0 <= code <= max_dac_code:
                     raise ValueError(
-                        f"Code must be between 0 and "
-                        f"{(1 << dac_bits) - 1}."
+                        f"Code {code} is outside the range "
+                        f"0 to {max_dac_code}."
                     )
 
                 codes.append(code)
 
             vref_mv = round(dac_vref * 1000)
 
-            result, raw_output = simulate_verilog(
-                "DAC", codes, dac_bits, vref_mv
+            simulation_results, raw_output = simulate_verilog(
+                "DAC",
+                codes,
+                dac_bits,
+                vref_mv,
             )
 
-            output_mv = [voltage for _, voltage in result]
+            output_mv = [
+                voltage for _, voltage in simulation_results
+            ]
 
-            rows = [{
-                "Sample": i,
-                "Digital_decimal": code,
-                "Digital_binary": format(code, f"0{dac_bits}b"),
-                "Output_voltage_V": round(mv / 1000, 6),
-            } for i, (code, mv) in enumerate(zip(codes, output_mv))]
+            rows = []
+
+            for index, (code, voltage_mv) in enumerate(
+                zip(codes, output_mv)
+            ):
+                rows.append({
+                    "Sample": index,
+                    "Digital_decimal": code,
+                    "Digital_binary": format(
+                        code, f"0{dac_bits}b"
+                    ),
+                    "Output_voltage_V": round(
+                        voltage_mv / 1000, 6
+                    ),
+                })
 
             if len(codes) == 1:
                 st.success(
-                    f"{format(codes[0], f'0{dac_bits}b')} "
-                    f"({codes[0]}) → {output_mv[0] / 1000:.6f} V"
+                    f"Digital code {format(codes[0], f'0{dac_bits}b')} "
+                    f"produces approximately "
+                    f"{output_mv[0] / 1000:.6f} V."
                 )
 
-            st.subheader("DAC analog output")
+            st.subheader("Analog output voltage")
 
             fig, ax = plt.subplots(figsize=(10, 4))
+
             ax.step(
                 range(len(codes)),
-                [mv / 1000 for mv in output_mv],
+                [voltage / 1000 for voltage in output_mv],
                 where="post",
-                marker="o"
+                marker="o",
             )
+
             ax.set_xlabel("Sample index")
             ax.set_ylabel("Output voltage (V)")
-            ax.set_title("Digital code converted to voltage")
+            ax.set_title("DAC output")
             ax.grid(True, alpha=0.3)
+
             st.pyplot(fig)
             plt.close(fig)
 
-            st.subheader("DAC results")
+            st.subheader("DAC conversion results")
+
             st.dataframe(
                 pd.DataFrame(rows),
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
             )
 
-            save_csv(rows, "dac_results.csv")
+            download_csv(rows, "dac_results.csv")
 
-            with st.expander("Raw Verilog simulation output"):
+            with st.expander("Verilog simulation output"):
                 st.code(raw_output)
 
         except Exception as error:
-            st.error(str(error))
+            st.error("DAC simulation failed.")
+            st.code(str(error)[:2000])
 
 
-# --------------------------------------------------
+# ==================================================
 # AI TUTOR
-# --------------------------------------------------
+# ==================================================
+
+def local_fallback(question):
+    """Basic response if the online AI service is unavailable."""
+
+    q = question.lower()
+
+    if "8086" in q or "assembly language" in q or " alp" in q:
+        return (
+            "### 8086 Assembly Language\n\n"
+            "8086 programs use instructions such as MOV, ADD, SUB, "
+            "INC, DEC, CMP and JMP. A program usually initializes "
+            "data, performs an operation, stores its result and "
+            "finishes according to the assembler being used.\n\n"
+            "The AI service is unavailable, so this is only a "
+            "general introduction, not a complete solution."
+        )
+
+    if "verilog" in q or "testbench" in q or "hdl" in q:
+        return (
+            "### Verilog HDL\n\n"
+            "Verilog describes digital hardware using modules, "
+            "inputs, outputs and logic. A testbench applies input "
+            "stimuli and checks the design's output. Icarus Verilog "
+            "can compile and simulate supported Verilog designs.\n\n"
+            "The AI service is unavailable, so this is only a "
+            "general introduction, not complete custom code."
+        )
+
+    if "adc" in q or "dac" in q or "electronics" in q:
+        return (
+            "### Electronics\n\n"
+            "An ADC converts an analog signal into a digital code. "
+            "A DAC converts a digital code into an analog voltage "
+            "or current. More detailed answers depend on the "
+            "specific circuit or question.\n\n"
+            "The AI service is unavailable, so this is only a "
+            "general introduction."
+        )
+
+    return (
+        "The AI service is currently unavailable. Check your "
+        "API key, account access, available API credits, model "
+        "access and network connection, then try again."
+    )
+
 
 with tutor_tab:
-    st.header("AI Tutor: Electronics, Verilog and 8086 ALP")
+    st.header("AI Tutor")
 
     st.write(
-        "Ask about electronic circuits, analog and digital electronics, "
-        "ADC/DAC, signals, communication systems, Verilog HDL, testbenches, "
-        "program debugging, or 8086 assembly language programs."
+        "Ask questions about electronics theory, analog circuits, "
+        "digital electronics, ADC/DAC, signal processing, "
+        "Verilog HDL, testbenches, debugging, or 8086 ALP."
     )
 
     question = st.text_area(
         "Enter your question",
         placeholder=(
             "Explain SAR ADC step by step.\n"
-            "Write Verilog code for a 4:1 multiplexer with testbench.\n"
+            "Write Verilog code for a 4:1 multiplexer "
+            "with a testbench.\n"
             "Write an 8086 ALP to add two 8-bit numbers."
         ),
-        height=140
+        height=150,
+        key="tutor_question",
     )
-
-    def local_fallback(question_text):
-        """Provide a non-empty basic response if the AI service fails."""
-        q = question_text.lower()
-
-        if "8086" in q or "assembly" in q or " alp" in q:
-            return (
-                "### 8086 Assembly Language\n"
-                "8086 ALP uses instructions such as MOV, ADD, SUB, "
-                "INC, DEC, CMP and JMP. A program usually initializes "
-                "data, performs the operation, stores the result and "
-                "ends according to the assembler or simulator being used.\n\n"
-                "Your AI API request failed, so this is only a general "
-                "introduction, not a solution to your specific program."
-            )
-
-        if "verilog" in q or "testbench" in q or "hdl" in q:
-            return (
-                "### Verilog HDL\n"
-                "A Verilog design declares inputs and outputs, then "
-                "describes hardware using continuous assignments or "
-                "procedural blocks. A testbench supplies inputs and "
-                "checks outputs. Icarus Verilog compiles the design, "
-                "and `vvp` runs the compiled simulation.\n\n"
-                "Your AI API request failed, so this is only a general "
-                "introduction, not the requested complete code."
-            )
-
-        if "adc" in q or "dac" in q or "electronics" in q or "circuit" in q:
-            return (
-                "### Electronics help\n"
-                "An ADC converts an analog signal into a digital code. "
-                "A DAC converts a digital code into an analog voltage "
-                "or current. Other electronics questions may require "
-                "circuit assumptions, formulas, diagrams, or step-by-step "
-                "calculations.\n\n"
-                "Your AI API request failed, so this is only a general "
-                "introduction, not a complete answer to your question."
-            )
-
-        return (
-            "I received your question, but the AI service is currently "
-            "unavailable. Please check the API key, model access, network "
-            "connection and quota, then try again. The basic fallback "
-            "cannot reliably answer every subject-specific question."
-        )
 
     if st.button("Ask AI Tutor", type="primary"):
         if not question.strip():
-            st.warning("Enter a question first.")
+            st.warning("Please enter a question first.")
 
         else:
-            api_key = os.getenv("GEMINI_API_KEY", "").strip()
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
 
             if not api_key:
-                st.warning(
-                    "GEMINI_API_KEY is not configured. Add it in Render's "
-                    "Environment settings to enable custom AI answers."
+                st.error(
+                    "OPENAI_API_KEY is missing. Add it in your "
+                    "Render Environment settings."
                 )
                 st.markdown(local_fallback(question))
 
             else:
                 try:
-                    from google import genai
+                    client = OpenAI(
+                        api_key=api_key,
+                        timeout=30.0,
+                        max_retries=1,
+                    )
 
-                    client = genai.Client(api_key=api_key)
+                    instructions = """
+You are an Electronics and Communication Engineering tutor.
 
-                    prompt = f"""
-You are a knowledgeable Electronics and Communication Engineering tutor.
+Answer the student's actual question clearly and completely
+using student-friendly language.
 
-Answer the student's question directly in clear, student-friendly language.
-Topics include analog electronics, digital electronics, circuits, signals,
-communication systems, measurements, ADC/DAC, microprocessors, 8086 ALP,
-8051, Verilog HDL, testbenches, simulation and code debugging.
+You can help with:
+- Analog and digital electronics
+- Electronic circuits and circuit analysis
+- ADC, DAC, filters, oscillators and amplifiers
+- Signals, systems and communication systems
+- Measurements and instrumentation
+- 8086 assembly language programs
+- 8051 microcontroller programming
+- Verilog HDL and testbenches
+- Simulation errors and debugging
 
-For code requests:
-- Provide complete, syntactically correct code.
-- Include required modules and testbenches when requested.
-- Explain how to compile or run the code.
-- Do not claim to have tested code unless you actually did.
+For programming questions:
+1. Provide complete code when requested.
+2. Include a testbench when requested.
+3. Explain the important instructions and logic.
+4. Show how to compile or simulate the code when useful.
+5. Do not claim the code was executed unless it actually was.
 
-For numerical questions, show formulas, substitutions, units and steps.
-For theory, explain the working principle, advantages, disadvantages and
-applications when relevant. If assumptions are needed, state them.
-Do not leave the answer blank.
+For numerical questions, show the formula, substitution,
+units and calculation steps. For theory questions, explain
+the working principle in clear language and include relevant
+applications when appropriate.
 
-Student's question:
-{question}
+If a detail is missing, state a reasonable assumption.
+Do not replace the student's specific question with a
+generic introduction.
 """
 
-                    with st.spinner("AI Tutor is preparing your answer..."):
-                        response = client.models.generate_content(
-                            model="gemini-3.8-flash",
-                            contents=prompt
+                    with st.spinner(
+                        "AI Tutor is generating your answer..."
+                    ):
+                        response = client.responses.create(
+                            model="gpt-5.5",
+                            instructions=instructions,
+                            input=question.strip(),
                         )
 
-                    answer = (getattr(response, "text", None) or "").strip()
+                    answer = (
+                        getattr(response, "output_text", "") or ""
+                    ).strip()
 
                     if answer:
+                        st.subheader("AI Tutor Answer")
                         st.markdown(answer)
                     else:
                         st.warning(
-                            "The AI returned an empty response. "
-                            "Showing the fallback explanation instead."
+                            "The API returned an empty answer. "
+                            "Please try again."
                         )
                         st.markdown(local_fallback(question))
 
                 except Exception as error:
                     st.error(
-                        "The AI service request failed. "
-                        "Showing a basic fallback response."
-                    )
-                    st.markdown(local_fallback(question))
-                    st.caption(
-                        "Technical details: "
-                        + str(error)[:500]
+                        "The OpenAI request failed. "
+                        "Check the technical details below."
                     )
 
+                    st.markdown(local_fallback(question))
+
+                    with st.expander("Technical details"):
+                        st.code(str(error)[:2000])
+
+
+# ==================================================
+# FOOTER
+# ==================================================
+
+st.divider()
+
 st.caption(
-    "Ideal behavioral simulation. Actual ADC/DAC circuits can have "
-    "noise, offset, settling time and nonlinearity."
+    "Educational ideal-converter simulation. Physical ADCs and "
+    "DACs may have noise, offset, settling time and nonlinearity. "
+    "AI responses require a working OpenAI API connection."
 )
 
 
