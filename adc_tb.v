@@ -1,16 +1,20 @@
+
 `timescale 1ns/1ps
 
-module tb_adc;
+module tb_adc #(
+    parameter integer BITS = 8,
+    parameter integer VREF_MV = 5000
+);
 
-    reg  [15:0] voltage_mv;
-    wire [9:0]  digital_code;
+    reg [31:0] voltage_mv;
+    wire [BITS-1:0] digital_code;
 
     integer input_file;
     integer scan_status;
 
     adc #(
-        .BITS(10),
-        .VREF_MV(5000)
+        .BITS(BITS),
+        .VREF_MV(VREF_MV)
     ) dut (
         .voltage_mv(voltage_mv),
         .digital_code(digital_code)
@@ -24,15 +28,13 @@ module tb_adc;
             $finish;
         end
 
-        $display("Voltage(mV) | Digital Code");
-        $display("--------------------------");
-
         while (!$feof(input_file)) begin
-            scan_status = $fscanf(input_file, "%d\n", voltage_mv);
+            scan_status = $fscanf(input_file, "%d", voltage_mv);
 
             if (scan_status == 1) begin
-                #10;
-                $display("%d | %d", voltage_mv, digital_code);
+                #1;
+                $display("ADC_RESULT %0d %0d",
+                         voltage_mv, digital_code);
             end
         end
 
@@ -41,3 +43,4 @@ module tb_adc;
     end
 
 endmodule
+
