@@ -1,49 +1,42 @@
-
 `timescale 1ns/1ps
 
-module adc_tb;
+module tb_adc;
 
-    reg [15:0] vin_mv;
-    wire [3:0] digital_out;
+    reg  [15:0] voltage_mv;
+    wire [9:0]  digital_code;
 
-    adc uut (
-        .vin_mv(vin_mv),
-        .digital_out(digital_out)
+    integer input_file;
+    integer scan_status;
+
+    adc #(
+        .BITS(10),
+        .VREF_MV(5000)
+    ) dut (
+        .voltage_mv(voltage_mv),
+        .digital_code(digital_code)
     );
 
-    integer i;
-
     initial begin
-        $dumpfile("adc_wave.vcd");
-        $dumpvars(0, adc_tb);
+        input_file = $fopen("adc_inputs.txt", "r");
 
-        $display("ADC RESULTS");
-        $display("Voltage_mV,Digital_Code");
+        if (input_file == 0) begin
+            $display("ERROR: Cannot open adc_inputs.txt");
+            $finish;
+        end
 
-        vin_mv = 0;
-        #10;
-        $display("%0d,%0d", vin_mv, digital_out);
+        $display("Voltage(mV) | Digital Code");
+        $display("--------------------------");
 
-        vin_mv = 500;
-        #10;
-        $display("%0d,%0d", vin_mv, digital_out);
+        while (!$feof(input_file)) begin
+            scan_status = $fscanf(input_file, "%d\n", voltage_mv);
 
-        vin_mv = 1000;
-        #10;
-        $display("%0d,%0d", vin_mv, digital_out);
+            if (scan_status == 1) begin
+                #10;
+                $display("%d | %d", voltage_mv, digital_code);
+            end
+        end
 
-        vin_mv = 1650;
-        #10;
-        $display("%0d,%0d", vin_mv, digital_out);
-
-        vin_mv = 2500;
-        #10;
-        $display("%0d,%0d", vin_mv, digital_out);
-
-        vin_mv = 3300;
-        #10;
-        $display("%0d,%0d", vin_mv, digital_out);
-
+        $fclose(input_file);
         $finish;
     end
 
